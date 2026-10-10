@@ -51,40 +51,53 @@ export function resolveResolutionDimensions(
   }
 }
 
+export function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 /**
- * Generates an FCPXML (Final Cut Pro / DaVinci Resolve XML).
+ * Generates an FCPXML (Final Cut Pro / DaVinci Resolve XML) compliant with FCPXML 1.9 DTD.
  */
 export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
   const frameRate = fps;
+  const isVideo = file.mediaType === 'video';
 
   let spineClips = '';
   let timelineOffsetFrames = 0;
+  const totalOriginalFrames = Math.max(1, Math.round(file.originalDuration * frameRate));
 
   keptSegments.forEach((seg, idx) => {
     const startFrames = Math.round(seg.start * frameRate);
-    const durationFrames = Math.round(seg.duration * frameRate);
+    const durationFrames = Math.max(1, Math.round(seg.duration * frameRate));
+    const clipName = `${escapeXml(file.name)} - Cut ${idx + 1}`;
 
     spineClips += `
-        <clip name="${file.name} - Cut ${idx + 1}" offset="${timelineOffsetFrames}/${frameRate}s" duration="${durationFrames}/${frameRate}s" start="${startFrames}/${frameRate}s">
-            <video ref="r1" duration="${Math.round(file.originalDuration * frameRate)}/${frameRate}s" />
-            <audio ref="r1" duration="${Math.round(file.originalDuration * frameRate)}/${frameRate}s" />
-        </clip>`;
+        <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames}/${frameRate}s" duration="${durationFrames}/${frameRate}s" start="${startFrames}/${frameRate}s" format="r0" />`;
 
     timelineOffsetFrames += durationFrames;
   });
+
+  const safeFileName = encodeURI(file.name).replace(/#/g, '%23').replace(/\?/g, '%3F');
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
     <resources>
-        <format id="r0" frameDuration="1/${frameRate}s" width="1920" height="1080" />
-        <asset id="r1" name="${file.name}" src="${file.url || file.name}" duration="${Math.round(file.originalDuration * frameRate)}/${frameRate}s" hasVideo="1" hasAudio="1" />
+        <format id="r0" name="FFVideoFormat1080p${frameRate}" frameDuration="1/${frameRate}s" width="1920" height="1080" />
+        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames}/${frameRate}s" format="r0" hasVideo="${isVideo ? '1' : '0'}" hasAudio="1">
+            <media-rep kind="original-media" src="file://localhost/${safeFileName}" />
+        </asset>
     </resources>
     <library>
         <event name="AutoEdit Export">
-            <project name="${file.name} (Silence Removed)">
-                <sequence format="r0" duration="${timelineOffsetFrames}/${frameRate}s">
+            <project name="${escapeXml(file.name)} (Silence Removed)">
+                <sequence format="r0" duration="${timelineOffsetFrames}/${frameRate}s" tcStart="0s" tcFormat="NDF">
                     <spine>${spineClips}
                     </spine>
                 </sequence>

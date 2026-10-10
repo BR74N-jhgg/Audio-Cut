@@ -1,15 +1,17 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Header } from './components/Header';
 import { DropZone } from './components/DropZone';
 import { WaveformTimeline } from './components/WaveformTimeline';
 import { BatchQueue } from './components/BatchQueue';
 import { ProcessingSettingsModal } from './components/ProcessingSettingsModal';
 import { GeneralSettingsModal } from './components/GeneralSettingsModal';
 import { ExportModal } from './components/ExportModal';
+import { ImportConfirmModal, PendingImportItem } from './components/ImportConfirmModal';
+import { ProcessingLoadingModal } from './components/ProcessingLoadingModal';
 import { ProcessedFile, ProcessingSettings, ThemeMode } from './types';
 import { DEFAULT_SETTINGS } from './utils/presets';
 import { decodeMediaFile, extractWaveformPeaks, detectSilence } from './utils/silenceDetector';
 import { SampleFootageItem } from './utils/sampleFootage';
+import { Sliders, Settings, Sun, Moon, RotateCcw, Smartphone, Monitor } from 'lucide-react';
 
 export default function App() {
   const [sessionName, setSessionName] = useState('Session - Oct 10');
@@ -17,7 +19,6 @@ export default function App() {
   const [files, setFiles] = useState<ProcessedFile[]>([]);
   const [activeFileId, setActiveFileId] = useState<string | null>(null);
   const [isProcessingBatch, setIsProcessingBatch] = useState(false);
-  const [isProcessingSample, setIsProcessingSample] = useState(false);
   const [isIosMode, setIsIosMode] = useState(false);
 
   // Theme: 'dark' = Navy Blue, 'light' = Tiffany Blue
@@ -36,7 +37,6 @@ export default function App() {
 
   const isDark = theme === 'dark';
 
-  // Apply theme to document element
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
@@ -45,6 +45,18 @@ export default function App() {
   const [isProcessingSettingsOpen, setIsProcessingSettingsOpen] = useState(false);
   const [isGeneralSettingsOpen, setIsGeneralSettingsOpen] = useState(false);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
+
+  // Import Confirm & Loading Screen state
+  const [pendingImportItems, setPendingImportItems] = useState<PendingImportItem[]>([]);
+  const [isImportConfirmOpen, setIsImportConfirmOpen] = useState(false);
+
+  // Loading Screen state
+  const [isProcessingLoadingOpen, setIsProcessingLoadingOpen] = useState(false);
+  const [loadingFileName, setLoadingFileName] = useState('');
+  const [loadingFileIndex, setLoadingFileIndex] = useState(1);
+  const [loadingTotalFiles, setLoadingTotalFiles] = useState(1);
+  const [loadingPercent, setLoadingPercent] = useState(0);
+  const [loadingStatusMessage, setLoadingStatusMessage] = useState('Initializing...');
 
   // Active file pointer
   const activeFile = useMemo(() => {
@@ -56,24 +68,30 @@ export default function App() {
     fileObj: File,
     id: string,
     existingUrl?: string,
-    existingBuffer?: AudioBuffer
+    existingBuffer?: AudioBuffer,
+    onStepProgress?: (pct: number, msg: string) => void
   ): Promise<ProcessedFile> => {
     const isVideo = fileObj.type.startsWith('video/') || /\.(mp4|mov|webm|m4v)$/i.test(fileObj.name);
     const mediaType = isVideo ? 'video' : 'audio';
     const url = existingUrl || URL.createObjectURL(fileObj);
 
-    // Format file size
     const sizeMb = (fileObj.size / (1024 * 1024)).toFixed(1);
     const sizeFormatted = `${sizeMb} MB`;
 
-    // Decode audio
+    onStepProgress?.(25, 'Decoding audio stream via native WebAudio DSP...');
+    await new Promise((r) => setTimeout(r, 60)); // allow UI frame render
     const audioBuffer = existingBuffer || (await decodeMediaFile(fileObj));
 
-    // Extract peaks for canvas rendering
+    onStepProgress?.(55, 'Extracting audio envelope & computing RMS energy...');
+    await new Promise((r) => setTimeout(r, 60));
     const waveformPeaks = extractWaveformPeaks(audioBuffer, 1500);
 
-    // Detect silence
+    onStepProgress?.(80, 'Detecting silence intervals & applying speech padding...');
+    await new Promise((r) => setTimeout(r, 60));
     const analysis = detectSilence(audioBuffer, settings);
+
+    onStepProgress?.(98, 'Finalizing jumpcut sequence...');
+    await new Promise((r) => setTimeout(r, 40));
 
     return {
       id,
@@ -94,68 +112,112 @@ export default function App() {
     };
   };
 
-  // Add files to queue and process
-  const handleFilesSelected = async (newFiles: File[]) => {
+  // 1. Files selected by user -> Show Confirm Window
+  const handleFilesSelected = (newFiles: File[]) => {
     if (newFiles.length === 0) return;
 
-    setIsProcessingBatch(true);
-    const newItems: ProcessedFile[] = [];
+    const items: PendingImportItem[] = newFiles.map((f) => {
+      const isVideo = f.type.startsWith('video/') || /\.(mp4|mov|webm|m4v)$/i.test(f.name);
+      return {
+        name: f.name,
+        sizeFormatted: `${(f.size / (1024 * 1024)).toFixed(1)} MB`,
+        type: isVideo ? 'video' : 'audio',
+        file: f,
+      };
+    });
 
-    for (let i = 0; i < newFiles.length; i++) {
-      const f = newFiles[i];
+    setPendingImportItems(items);
+    setIsImportConfirmOpen(true);
+  };
+
+  // 2. Sample selected by user -> Show Confirm Window
+  const handleLoadSample = (sample: SampleFootageItem) => {
+    const items: PendingImportItem[] = [
+      {
+        name: sample.name,
+        sizeFormatted: `${sample.duration}s clip`,
+        type: sample.mediaType,
+        sampleGenerator: sample.generate,
+      },
+    ];
+
+    setPendingImportItems(items);
+    setIsImportConfirmOpen(true);
+  };
+
+  // 3. User Confirmed in Modal -> Execute processing with Loading Screen
+  const handleConfirmProcessing = async () => {
+    setIsImportConfirmOpen(false);
+    if (pendingImportItems.length === 0) return;
+
+    setIsProcessingLoadingOpen(true);
+    setLoadingTotalFiles(pendingImportItems.length);
+    setIsProcessingBatch(true);
+
+    const newProcessedItems: ProcessedFile[] = [];
+
+    for (let i = 0; i < pendingImportItems.length; i++) {
+      const item = pendingImportItems[i];
+      setLoadingFileIndex(i + 1);
+      setLoadingFileName(item.name);
+      setLoadingPercent(10);
+      setLoadingStatusMessage('Preparing file for analysis...');
+
       const id = `file-${Date.now()}-${i}`;
 
       try {
-        const processed = await processSingleFile(f, id);
-        newItems.push(processed);
-      } catch (err) {
-        console.error('Failed to process file:', f.name, err);
-        newItems.push({
+        let fileObj: File;
+        let url: string | undefined;
+        let buffer: AudioBuffer | undefined;
+
+        if (item.sampleGenerator) {
+          setLoadingPercent(20);
+          setLoadingStatusMessage('Synthesizing sample audio stream...');
+          const gen = await item.sampleGenerator();
+          fileObj = gen.file;
+          url = gen.url;
+          buffer = gen.buffer;
+        } else if (item.file) {
+          fileObj = item.file;
+        } else {
+          continue;
+        }
+
+        const processed = await processSingleFile(
+          fileObj,
           id,
-          name: f.name,
-          file: f,
-          url: URL.createObjectURL(f),
-          mediaType: f.type.startsWith('video/') ? 'video' : 'audio',
-          sizeFormatted: `${(f.size / (1024 * 1024)).toFixed(1)} MB`,
-          originalDuration: 0,
-          newDuration: 0,
-          timeSavedPercentage: 0,
-          cutsCount: 0,
-          status: 'error',
-          errorMessage: 'Unable to decode media audio track',
-          progress: 0,
-          waveformPeaks: [],
-          segments: [],
-        });
+          url,
+          buffer,
+          (stepPct, stepMsg) => {
+            const overallPct = Math.round(
+              ((i + stepPct / 100) / pendingImportItems.length) * 100
+            );
+            setLoadingPercent(Math.min(99, Math.max(10, overallPct)));
+            setLoadingStatusMessage(stepMsg);
+          }
+        );
+
+        newProcessedItems.push(processed);
+      } catch (err) {
+        console.error('Failed to process file:', item.name, err);
       }
     }
 
+    setLoadingPercent(100);
+    setLoadingStatusMessage('Silence removal complete!');
+    await new Promise((r) => setTimeout(r, 350));
+
     setFiles((prev) => {
-      const merged = [...prev, ...newItems];
+      const merged = [...prev, ...newProcessedItems];
       if (!activeFileId && merged.length > 0) {
         setActiveFileId(merged[0].id);
       }
       return merged;
     });
 
+    setIsProcessingLoadingOpen(false);
     setIsProcessingBatch(false);
-  };
-
-  // Load procedural sample footage
-  const handleLoadSample = async (sample: SampleFootageItem) => {
-    setIsProcessingSample(true);
-    try {
-      const { file, buffer, url } = await sample.generate();
-      const id = `sample-${Date.now()}`;
-      const processed = await processSingleFile(file, id, url, buffer);
-
-      setFiles((prev) => [processed, ...prev]);
-      setActiveFileId(id);
-    } catch (err: any) {
-      alert(`Error loading sample: ${err.message}`);
-    } finally {
-      setIsProcessingSample(false);
-    }
+    setPendingImportItems([]);
   };
 
   // Automatically recalculate cuts when settings change
@@ -261,21 +323,6 @@ export default function App() {
           : ''
       }`}
     >
-      {/* Top Header */}
-      <Header
-        sessionName={sessionName}
-        setSessionName={setSessionName}
-        settings={settings}
-        onOpenProcessingSettings={() => setIsProcessingSettingsOpen(true)}
-        onOpenGeneralSettings={() => setIsGeneralSettingsOpen(true)}
-        onResetSession={handleResetSession}
-        isIosMode={isIosMode}
-        setIsIosMode={setIsIosMode}
-        theme={theme}
-        onToggleTheme={toggleTheme}
-        hasFiles={files.length > 0}
-      />
-
       {/* Main View Area */}
       <main className="flex-1 overflow-y-auto px-4 py-5 max-w-6xl w-full mx-auto space-y-6">
         {files.length === 0 ? (
@@ -283,7 +330,7 @@ export default function App() {
             <DropZone
               onFilesSelected={handleFilesSelected}
               onLoadSample={handleLoadSample}
-              isProcessingSample={isProcessingSample}
+              isProcessingSample={isProcessingLoadingOpen}
               theme={theme}
             />
           </div>
@@ -323,37 +370,140 @@ export default function App() {
         )}
       </main>
 
-      {/* Bottom Status Bar */}
+      {/* Bottom Status Bar with Control Actions */}
       <footer
-        className={`border-t px-4 py-2.5 text-[11px] flex flex-wrap items-center justify-between gap-2 select-none transition-colors ${
+        className={`border-t px-4 py-2.5 text-[11px] flex flex-wrap items-center justify-between gap-3 select-none transition-colors ${
           isDark
             ? 'border-[#1b2e59] bg-[#0a1128]/95 text-slate-400'
             : 'border-[#b2ebe7] bg-white/95 text-slate-600 shadow-inner'
         }`}
       >
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1.5">
             <span
               className={`w-2 h-2 rounded-full ${isDark ? 'bg-cyan-400' : 'bg-[#0ABAB5]'}`}
             />
-            <span className={isDark ? 'text-slate-300' : 'text-slate-700'}>
-              Engine: Connected • Fast native WebAudio DSP analysis
+            <span className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+              AutoEdit
+            </span>
+            <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>
+              • Connected (Fast WebAudio DSP)
             </span>
           </div>
+
           <span className={isDark ? 'text-[#1e3260]' : 'text-[#ccf4f1]'}>|</span>
+
           <span>
-            Theme: <b>{isDark ? 'Navy Blue (Dark)' : 'Tiffany Blue (Light)'}</b>
+            Preset: <b className="capitalize">{settings.preset}</b> ({settings.sensitivityMode === 'auto' ? `Auto ${settings.sensitivityLevel}` : `${settings.thresholdDb} dB`})
           </span>
+
           <span className={isDark ? 'text-[#1e3260]' : 'text-[#ccf4f1]'}>|</span>
+
           <span>
-            Silence Threshold: {settings.sensitivityMode === 'auto' ? `Auto (${settings.sensitivityLevel})` : `${settings.thresholdDb} dB`}
+            Padding: {Math.round(settings.padBefore * 1000)}ms / {Math.round(settings.padAfter * 1000)}ms
           </span>
         </div>
 
-        <div className="flex items-center gap-3 font-mono">
-          <span>AutoEdit macOS & iOS v2.5</span>
+        {/* Footer Actions */}
+        <div className="flex items-center gap-2">
+          {/* Theme switcher */}
+          <button
+            onClick={toggleTheme}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-semibold border transition-all cursor-pointer ${
+              isDark
+                ? 'bg-[#111f3d] border-[#1e3260] text-cyan-300 hover:border-cyan-400'
+                : 'bg-[#e4f7f6] border-[#a2e5e0] text-[#0d746f] hover:border-[#0ABAB5]'
+            }`}
+            title="Toggle Navy Blue Dark / Tiffany Blue Light"
+          >
+            {isDark ? <Moon className="w-3.5 h-3.5 text-cyan-400" /> : <Sun className="w-3.5 h-3.5 text-[#0ABAB5]" />}
+            <span>{isDark ? 'Navy Blue' : 'Tiffany Blue'}</span>
+          </button>
+
+          {/* Customize Thresholds */}
+          <button
+            onClick={() => setIsProcessingSettingsOpen(true)}
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg font-medium border transition-colors cursor-pointer ${
+              isDark
+                ? 'bg-[#111f3d] border-[#1e3260] text-slate-300 hover:text-white'
+                : 'bg-white border-[#b2ebe7] text-slate-700 hover:text-slate-900'
+            }`}
+          >
+            <Sliders className={`w-3.5 h-3.5 ${isDark ? 'text-cyan-400' : 'text-[#0ABAB5]'}`} />
+            <span>Customize</span>
+          </button>
+
+          {/* General Settings */}
+          <button
+            onClick={() => setIsGeneralSettingsOpen(true)}
+            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+              isDark
+                ? 'bg-[#111f3d] border-[#1e3260] text-slate-400 hover:text-white'
+                : 'bg-white border-[#b2ebe7] text-slate-600 hover:text-slate-900'
+            }`}
+            title="Settings"
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </button>
+
+          {/* iOS Mode toggle */}
+          <button
+            onClick={() => setIsIosMode(!isIosMode)}
+            className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+              isIosMode
+                ? isDark
+                  ? 'bg-blue-600/30 text-cyan-300 border-blue-500/60'
+                  : 'bg-[#0ABAB5]/20 text-[#0d746f] border-[#0ABAB5]'
+                : isDark
+                ? 'bg-[#111f3d] border-[#1e3260] text-slate-400 hover:text-white'
+                : 'bg-white border-[#b2ebe7] text-slate-600 hover:text-slate-900'
+            }`}
+            title={isIosMode ? 'Switch to Desktop Mode' : 'Switch to iOS Mobile View'}
+          >
+            {isIosMode ? <Smartphone className="w-3.5 h-3.5" /> : <Monitor className="w-3.5 h-3.5" />}
+          </button>
+
+          {/* Reset Session */}
+          {files.length > 0 && (
+            <button
+              onClick={handleResetSession}
+              className={`p-1.5 rounded-lg border transition-colors cursor-pointer ${
+                isDark
+                  ? 'bg-[#111f3d] border-[#1e3260] text-slate-400 hover:text-rose-400'
+                  : 'bg-white border-[#b2ebe7] text-slate-600 hover:text-rose-500'
+              }`}
+              title="Reset Session / Clear Queue"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       </footer>
+
+      {/* Confirmation Modal prior to processing import */}
+      <ImportConfirmModal
+        isOpen={isImportConfirmOpen}
+        onClose={() => {
+          setIsImportConfirmOpen(false);
+          setPendingImportItems([]);
+        }}
+        onConfirm={handleConfirmProcessing}
+        pendingItems={pendingImportItems}
+        settings={settings}
+        onOpenSettings={() => setIsProcessingSettingsOpen(true)}
+        theme={theme}
+      />
+
+      {/* Processing Loading Screen */}
+      <ProcessingLoadingModal
+        isOpen={isProcessingLoadingOpen}
+        currentFileName={loadingFileName}
+        currentIndex={loadingFileIndex}
+        totalFiles={loadingTotalFiles}
+        percent={loadingPercent}
+        statusMessage={loadingStatusMessage}
+        theme={theme}
+      />
 
       {/* Modals */}
       <ProcessingSettingsModal
