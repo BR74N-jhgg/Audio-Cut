@@ -1,0 +1,6 @@
+{
+  "name": "AutoEdit - Smart Silence Remover & Jumpcutter",
+  "description": "Professional video and audio silence removal tool for macOS and iOS. Automatically cut silent pauses with batch processing, customizable sensitivity thresholds, waveform timeline, and AI pacing analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
