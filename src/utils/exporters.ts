@@ -61,24 +61,45 @@ export function escapeXml(str: string): string {
 }
 
 /**
+ * Helper to convert decimal frame rates (e.g., 29.97, 59.94) into strictly integer FCPXML timebases.
+ */
+function getFcpTimebase(fps: number) {
+  const roundedFps = Math.round(fps * 1000);
+  switch (roundedFps) {
+    case 23976: return { fpsName: "23.98", frameDuration: "1001/24000s", num: 1001, den: 24000 };
+    case 24000: return { fpsName: "24",    frameDuration: "100/2400s",    num: 100, den: 2400 };
+    case 25000: return { fpsName: "25",    frameDuration: "1/25s",        num: 1, den: 25 };
+    case 29970: return { fpsName: "29.97", frameDuration: "1001/30000s",  num: 1001, den: 30000 };
+    case 30000: return { fpsName: "30",    frameDuration: "100/3000s",    num: 100, den: 3000 };
+    case 50000: return { fpsName: "50",    frameDuration: "1/50s",        num: 1, den: 50 };
+    case 59940: return { fpsName: "59.94", frameDuration: "1001/60000s",  num: 1001, den: 60000 };
+    case 60000: return { fpsName: "60",    frameDuration: "100/6000s",    num: 100, den: 6000 };
+    default:
+      const intFps = Math.round(fps);
+      return { fpsName: String(intFps), frameDuration: `1/${intFps}s`, num: 1, den: intFps };
+  }
+}
+
+/**
  * Generates an FCPXML (Final Cut Pro / DaVinci Resolve XML) compliant with FCPXML 1.9 DTD.
  */
 export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
-  const frameRate = fps;
   const isVideo = file.mediaType === 'video';
-
+  
+  const tb = getFcpTimebase(fps);
+  
   let spineClips = '';
   let timelineOffsetFrames = 0;
-  const totalOriginalFrames = Math.max(1, Math.floor(file.originalDuration * frameRate));
+  const totalOriginalFrames = Math.max(1, Math.floor(file.originalDuration * fps));
 
   keptSegments.forEach((seg, idx) => {
-    const startFrames = Math.round(seg.start * frameRate);
-    const durationFrames = Math.max(1, Math.round(seg.duration * frameRate));
+    const startFrames = Math.round(seg.start * fps);
+    const durationFrames = Math.max(1, Math.round(seg.duration * fps));
     const clipName = `${escapeXml(file.name)} - Cut ${idx + 1}`;
 
     spineClips += `
-        <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames}/${frameRate}s" duration="${durationFrames}/${frameRate}s" start="${startFrames}/${frameRate}s" format="r0" />`;
+        <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames * tb.num}/${tb.den}s" duration="${durationFrames * tb.num}/${tb.den}s" start="${startFrames * tb.num}/${tb.den}s" format="r0" />`;
 
     timelineOffsetFrames += durationFrames;
   });
@@ -89,15 +110,15 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
     <resources>
-        <format id="r0" name="FFVideoFormat1080p${frameRate}" frameDuration="1/${frameRate}s" width="1920" height="1080" />
-        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames}/${frameRate}s" format="r0" hasVideo="${isVideo ? '1' : '0'}" hasAudio="1" audioSources="1" audioChannels="2">
+        <format id="r0" name="FFVideoFormat1080p${tb.fpsName}" frameDuration="${tb.frameDuration}" width="1920" height="1080" />
+        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames * tb.num}/${tb.den}s" format="r0" hasVideo="${isVideo ? '1' : '0'}" hasAudio="1" audioSources="1" audioChannels="2">
             <media-rep kind="original-media" src="file:///Users/Shared/${safeFileName}" />
         </asset>
     </resources>
     <library>
         <event name="AutoEdit Export">
             <project name="${escapeXml(file.name)} (Silence Removed)">
-                <sequence format="r0" duration="${timelineOffsetFrames}/${frameRate}s" tcStart="0s" tcFormat="NDF">
+                <sequence format="r0" duration="${timelineOffsetFrames * tb.num}/${tb.den}s" tcStart="0s" tcFormat="NDF">
                     <spine>${spineClips}
                     </spine>
                 </sequence>
