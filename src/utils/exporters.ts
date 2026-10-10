@@ -10,10 +10,11 @@ import {
  * Format seconds into HH:MM:SS:FF or HH:MM:SS.mmm
  */
 export function formatTimecode(seconds: number, fps: number = 30): string {
+  const roundedFps = Math.round(fps);
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  const f = Math.floor((seconds % 1) * fps);
+  const f = Math.floor((seconds % 1) * roundedFps);
 
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
 }
@@ -33,18 +34,12 @@ export function resolveResolutionDimensions(
   sourceHeight: number = 1080
 ): { width: number; height: number } {
   switch (preset) {
-    case '4k':
-      return { width: 3840, height: 2160 };
-    case '1440p':
-      return { width: 2560, height: 1440 };
-    case '1080p':
-      return { width: 1920, height: 1080 };
-    case '720p':
-      return { width: 1280, height: 720 };
-    case 'vertical_1080p':
-      return { width: 1080, height: 1920 };
-    case '540p':
-      return { width: 960, height: 540 };
+    case '4k': return { width: 3840, height: 2160 };
+    case '1440p': return { width: 2560, height: 1440 };
+    case '1080p': return { width: 1920, height: 1080 };
+    case '720p': return { width: 1280, height: 720 };
+    case 'vertical_1080p': return { width: 1080, height: 1920 };
+    case '540p': return { width: 960, height: 540 };
     case 'source':
     default:
       return { width: sourceWidth || 1920, height: sourceHeight || 1080 };
@@ -62,23 +57,21 @@ export function escapeXml(str: string): string {
 
 /**
  * Helper to convert decimal frame rates (e.g., 29.97, 59.94) into strictly integer FCPXML timebases.
- * Provides the EXACT format names registered inside Final Cut Pro.
  */
 function getFcpTimebase(fps: number) {
-  const roundedFps = Math.round(fps * 1000);
-  switch (roundedFps) {
-    case 23976: return { fpsName: "2398", frameDuration: "1001/24000s", num: 1001, den: 24000 };
-    case 24000: return { fpsName: "24",   frameDuration: "100/2400s",    num: 100, den: 2400 };
-    case 25000: return { fpsName: "25",   frameDuration: "1/25s",        num: 1, den: 25 };
-    case 29970: return { fpsName: "2997", frameDuration: "1001/30000s",  num: 1001, den: 30000 };
-    case 30000: return { fpsName: "30",   frameDuration: "100/3000s",    num: 100, den: 3000 };
-    case 50000: return { fpsName: "50",   frameDuration: "1/50s",        num: 1, den: 50 };
-    case 59940: return { fpsName: "5994", frameDuration: "1001/60000s",  num: 1001, den: 60000 };
-    case 60000: return { fpsName: "60",   frameDuration: "100/6000s",    num: 100, den: 6000 };
-    default:
-      const intFps = Math.round(fps);
-      return { fpsName: String(intFps), frameDuration: `1/${intFps}s`, num: 1, den: intFps };
-  }
+  const fpsFloat = Math.round(fps * 1000) / 1000;
+
+  if (fpsFloat >= 23.97 && fpsFloat <= 23.98) return { fpsName: "2398", frameDuration: "1001/24000s", num: 1001, den: 24000 };
+  if (fpsFloat === 24) return { fpsName: "24", frameDuration: "100/2400s", num: 100, den: 2400 };
+  if (fpsFloat === 25) return { fpsName: "25", frameDuration: "100/2500s", num: 100, den: 2500 };
+  if (fpsFloat >= 29.97 && fpsFloat <= 29.98) return { fpsName: "2997", frameDuration: "1001/30000s", num: 1001, den: 30000 };
+  if (fpsFloat === 30) return { fpsName: "30", frameDuration: "100/3000s", num: 100, den: 3000 };
+  if (fpsFloat === 50) return { fpsName: "50", frameDuration: "100/5000s", num: 100, den: 5000 };
+  if (fpsFloat >= 59.94 && fpsFloat <= 59.95) return { fpsName: "5994", frameDuration: "1001/60000s", num: 1001, den: 60000 };
+  if (fpsFloat === 60) return { fpsName: "60", frameDuration: "100/6000s", num: 100, den: 6000 };
+  
+  const intFps = Math.round(fpsFloat);
+  return { fpsName: String(intFps), frameDuration: `100/${intFps * 100}s`, num: 100, den: intFps * 100 };
 }
 
 /**
@@ -86,37 +79,52 @@ function getFcpTimebase(fps: number) {
  */
 export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
-  const isVideo = file.mediaType === 'video';
   
   const tb = getFcpTimebase(fps);
-  const exactFps = tb.den / tb.num; // Precise rational math prevents frame-drift
+  const exactFps = tb.den / tb.num;
+  
+  // SAFEGUARD CLAMP: Browsers measure audio track duration, which is often 1-2 frames 
+  // longer than the physical video track. We subtract 1 frame from the total safe bounds 
+  // to ensure FCP never requests an out-of-bounds frame ("no shared media range").
+  const safeTotalFrames = Math.max(1, Math.floor(file.originalDuration * exactFps) - 1);
   
   let spineClips = '';
   let timelineOffsetFrames = 0;
-  
-  // Use Math.round with precise rational FPS to perfectly match frame counts
-  const totalOriginalFrames = Math.max(1, Math.round(file.originalDuration * exactFps));
 
   keptSegments.forEach((seg, idx) => {
-    const startFrames = Math.round(seg.start * exactFps);
-    const durationFrames = Math.max(1, Math.round(seg.duration * exactFps));
+    let startFrames = Math.round(seg.start * exactFps);
+    let durationFrames = Math.max(1, Math.round(seg.duration * exactFps));
+
+    // Clamp the individual clip so it never asks for a frame past the safe file bounds
+    if (startFrames >= safeTotalFrames) return; 
+    if (startFrames + durationFrames > safeTotalFrames) {
+      durationFrames = safeTotalFrames - startFrames;
+    }
+    if (durationFrames <= 0) return;
+
     const clipName = `${escapeXml(file.name)} - Cut ${idx + 1}`;
+    
+    // FCP strongly prefers "0s" instead of "0/30000s"
+    const startStr = startFrames === 0 ? "0s" : `${startFrames * tb.num}/${tb.den}s`;
+    const offsetStr = timelineOffsetFrames === 0 ? "0s" : `${timelineOffsetFrames * tb.num}/${tb.den}s`;
+    const durationStr = `${durationFrames * tb.num}/${tb.den}s`;
 
     spineClips += `
-                    <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames * tb.num}/${tb.den}s" duration="${durationFrames * tb.num}/${tb.den}s" start="${startFrames * tb.num}/${tb.den}s" />`;
+                    <asset-clip name="${clipName}" ref="r1" offset="${offsetStr}" duration="${durationStr}" start="${startStr}" format="r0" tcFormat="NDF" />`;
 
     timelineOffsetFrames += durationFrames;
   });
 
   const safeFileName = encodeURI(file.name).replace(/#/g, '%23').replace(/\?/g, '%3F');
-  const hasVideoAttr = isVideo ? 'hasVideo="1"' : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
     <resources>
         <format id="r0" name="FFVideoFormat1080p${tb.fpsName}" frameDuration="${tb.frameDuration}" width="1920" height="1080" />
-        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames * tb.num}/${tb.den}s" format="r0" ${hasVideoAttr} hasAudio="1" audioSources="1" audioChannels="2">
+        <!-- REMOVED hasVideo/hasAudio/audioChannels constraints. 
+             FCP will now dynamically adapt to whatever track configuration the DJI file has. -->
+        <asset id="r1" name="${escapeXml(file.name)}" duration="${safeTotalFrames * tb.num}/${tb.den}s" format="r0">
             <media-rep kind="original-media" src="file:///Users/Shared/${safeFileName}" />
         </asset>
     </resources>
@@ -139,6 +147,9 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
 export function generatePremiereXml(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
   const totalFrames = Math.round(file.newDuration * fps);
+  
+  const roundedFps = Math.round(fps);
+  const isNtsc = roundedFps !== fps;
 
   let trackClips = '';
   let currentIn = 0;
@@ -155,8 +166,8 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                 <name>${file.name} [Cut ${idx + 1}]</name>
                 <duration>${Math.round(file.originalDuration * fps)}</duration>
                 <rate>
-                    <timebase>${fps}</timebase>
-                    <ntsc>FALSE</ntsc>
+                    <timebase>${roundedFps}</timebase>
+                    <ntsc>${isNtsc ? 'TRUE' : 'FALSE'}</ntsc>
                 </rate>
                 <start>${trackStart}</start>
                 <end>${trackEnd}</end>
@@ -166,7 +177,7 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                     <name>${file.name}</name>
                     <pathurl>${file.name}</pathurl>
                     <rate>
-                        <timebase>${fps}</timebase>
+                        <timebase>${roundedFps}</timebase>
                     </rate>
                     <duration>${Math.round(file.originalDuration * fps)}</duration>
                 </file>
@@ -182,8 +193,8 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
         <name>${file.name} - AutoEdit Jumpcut</name>
         <duration>${totalFrames}</duration>
         <rate>
-            <timebase>${fps}</timebase>
-            <ntsc>FALSE</ntsc>
+            <timebase>${roundedFps}</timebase>
+            <ntsc>${isNtsc ? 'TRUE' : 'FALSE'}</ntsc>
         </rate>
         <media>
             <video>
@@ -192,7 +203,7 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                         <width>1920</width>
                         <height>1080</height>
                         <rate>
-                            <timebase>${fps}</timebase>
+                            <timebase>${roundedFps}</timebase>
                         </rate>
                     </samplecharacteristics>
                 </format>
@@ -290,12 +301,6 @@ export interface ExportProgress {
 
 /**
  * High-performance Video Rendering & Stitching Engine
- * Concatenates kept video frames and audio, respecting user settings:
- * - Resolution (4K, 1080p, 720p, etc.)
- * - Frame rate (24, 30, 60 fps)
- * - Video bitrate (Mbps)
- * - Audio bitrate (kbps)
- * - Format (MP4, MOV, WebM)
  */
 export async function renderAndExportCutVideo(
   file: ProcessedFile,
@@ -309,7 +314,6 @@ export async function renderAndExportCutVideo(
 
   onProgress?.({ percent: 5, currentStep: 'Initializing hardware encoder & canvas pipeline...' });
 
-  // Setup offscreen video element
   const video = document.createElement('video');
   video.src = file.url;
   video.muted = false;
@@ -331,13 +335,11 @@ export async function renderAndExportCutVideo(
   const videoBitrate = Math.round(options.bitrateMbps * 1_000_000);
   const audioBitrate = Math.round(options.audioBitrateKbps * 1_000);
 
-  // Setup Canvas
   const canvas = document.createElement('canvas');
   canvas.width = targetWidth;
   canvas.height = targetHeight;
   const ctx = canvas.getContext('2d')!;
 
-  // Setup Web Audio graph for video audio track
   const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
     sampleRate: options.audioSampleRate || 48000,
   });
@@ -346,14 +348,12 @@ export async function renderAndExportCutVideo(
   const destNode = audioCtx.createMediaStreamDestination();
   sourceNode.connect(destNode);
 
-  // Combine Canvas video stream + Audio stream
   const canvasStream = canvas.captureStream(targetFps);
   const combinedStream = new MediaStream([
     ...canvasStream.getVideoTracks(),
     ...destNode.stream.getAudioTracks(),
   ]);
 
-  // Determine optimal supported MIME type
   let mimeType = 'video/webm';
   if (options.format === 'mp4') {
     if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.4d401f,mp4a.40.2')) {
@@ -408,7 +408,6 @@ export async function renderAndExportCutVideo(
 
   recorder.start(100);
 
-  // Render loop across kept segments
   const totalKeptDuration = keptSegments.reduce((sum, s) => sum + s.duration, 0);
   let renderedKeptDuration = 0;
 
@@ -422,7 +421,6 @@ export async function renderAndExportCutVideo(
       timeRemainingSec: Math.max(1, Math.round((totalKeptDuration - renderedKeptDuration) * 0.8)),
     });
 
-    // Seek video to segment start
     video.currentTime = seg.start;
     await new Promise<void>((r) => {
       const onSeeked = () => {
@@ -432,15 +430,12 @@ export async function renderAndExportCutVideo(
       video.addEventListener('seeked', onSeeked);
     });
 
-    // Play segment and draw to canvas
     await new Promise<void>((resolveSegment) => {
       let isSegDone = false;
       video.play().catch(() => {});
 
       const checkSegmentProgress = () => {
         if (isSegDone) return;
-
-        // Draw current video frame to canvas scaled
         ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
 
         if (video.currentTime >= seg.end || video.paused || video.ended) {
@@ -460,11 +455,9 @@ export async function renderAndExportCutVideo(
 
   onProgress?.({ percent: 98, currentStep: 'Finalizing container header & muxing media...' });
 
-  // Stop recorder & wait for blob
   recorder.stop();
   const finalBlob = await completionPromise;
 
-  // Clean up WebAudio
   if (audioCtx.state !== 'closed') {
     audioCtx.close().catch(() => {});
   }
@@ -478,8 +471,6 @@ export async function renderAndExportCutVideo(
 
 /**
  * High-performance Audio Rendering & Resampling Engine
- * Stitches kept segments and exports in WAV (16/24-bit), MP3, M4A/AAC, or OGG,
- * with customizable sample rate (48kHz, 44.1kHz, 96kHz, 32kHz) and bitrate (320kbps, etc.)
  */
 export async function renderAndExportCutAudio(
   file: ProcessedFile,
@@ -501,11 +492,9 @@ export async function renderAndExportCutAudio(
   const targetSampleRate = options.sampleRate || 48000;
   const numChannels = options.channels === 'mono' ? 1 : Math.min(2, srcBuffer.numberOfChannels);
 
-  // Calculate total samples required at target sample rate
   const totalKeptDuration = keptSegments.reduce((sum, s) => sum + s.duration, 0);
   const totalOutputSamples = Math.ceil(totalKeptDuration * targetSampleRate);
 
-  // Use OfflineAudioContext for professional native DSP resampling & anti-aliasing
   const offlineCtx = new OfflineAudioContext(numChannels, totalOutputSamples, targetSampleRate);
 
   onProgress?.({ percent: 30, currentStep: `Scheduling ${keptSegments.length} speech chunks at ${targetSampleRate / 1000} kHz...` });
@@ -514,11 +503,7 @@ export async function renderAndExportCutAudio(
   for (const seg of keptSegments) {
     const sourceNode = offlineCtx.createBufferSource();
     sourceNode.buffer = srcBuffer;
-
-    // Connect node to destination
     sourceNode.connect(offlineCtx.destination);
-
-    // Schedule playback of the slice
     sourceNode.start(timelineOffset, seg.start, seg.duration);
     timelineOffset += seg.duration;
   }
@@ -531,7 +516,6 @@ export async function renderAndExportCutAudio(
   const cleanName = file.name.replace(/\.[^/.]+$/, '');
 
   if (options.format === 'wav') {
-    // Generate lossless WAV (16-bit or 24-bit PCM)
     const wavBlob = encodeWavBuffer(renderedBuffer, options.bitDepth || 16);
     onProgress?.({ percent: 100, currentStep: 'WAV generation complete! Downloading...' });
     downloadFile(
@@ -540,7 +524,6 @@ export async function renderAndExportCutAudio(
       'audio/wav'
     );
   } else {
-    // MP3 / AAC / OGG encoding using MediaRecorder / Web Audio encoder
     const encodedBlob = await encodeCompressedAudio(renderedBuffer, options);
     onProgress?.({ percent: 100, currentStep: `${options.format.toUpperCase()} complete! Downloading...` });
     downloadFile(
@@ -551,9 +534,6 @@ export async function renderAndExportCutAudio(
   }
 }
 
-/**
- * Lossless WAV Encoder with 16-bit or 24-bit PCM support
- */
 function encodeWavBuffer(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
   const numChannels = buffer.numberOfChannels;
   const sampleRate = buffer.sampleRate;
@@ -574,7 +554,7 @@ function encodeWavBuffer(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
   writeString(8, 'WAVE');
   writeString(12, 'fmt ');
   view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true); // PCM format
+  view.setUint16(20, 1, true);
   view.setUint16(22, numChannels, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
@@ -594,7 +574,6 @@ function encodeWavBuffer(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
       }
     }
   } else {
-    // 24-bit PCM
     for (let i = 0; i < numSamples; i++) {
       for (let c = 0; c < numChannels; c++) {
         const s = Math.max(-1, Math.min(1, buffer.getChannelData(c)[i]));
@@ -610,9 +589,6 @@ function encodeWavBuffer(buffer: AudioBuffer, bitDepth: 16 | 24 = 16): Blob {
   return new Blob([arrayBuffer], { type: 'audio/wav' });
 }
 
-/**
- * Encodes AudioBuffer into compressed formats (MP3 / AAC / OGG) with customizable bitrate
- */
 async function encodeCompressedAudio(
   buffer: AudioBuffer,
   options: AudioExportOptions
@@ -623,34 +599,21 @@ async function encodeCompressedAudio(
 
   const sourceNode = audioCtx.createBufferSource();
   sourceNode.buffer = buffer;
-
   const destNode = audioCtx.createMediaStreamDestination();
   sourceNode.connect(destNode);
 
-  // Target MIME type detection
   let mimeType = 'audio/webm;codecs=opus';
   if (options.format === 'mp3') {
-    if (MediaRecorder.isTypeSupported('audio/mpeg')) {
-      mimeType = 'audio/mpeg';
-    } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-      mimeType = 'audio/mp4';
-    } else {
-      mimeType = 'audio/webm;codecs=opus';
-    }
+    if (MediaRecorder.isTypeSupported('audio/mpeg')) mimeType = 'audio/mpeg';
+    else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
+    else mimeType = 'audio/webm;codecs=opus';
   } else if (options.format === 'm4a') {
-    if (MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2')) {
-      mimeType = 'audio/mp4;codecs=mp4a.40.2';
-    } else if (MediaRecorder.isTypeSupported('audio/mp4')) {
-      mimeType = 'audio/mp4';
-    } else {
-      mimeType = 'audio/webm';
-    }
+    if (MediaRecorder.isTypeSupported('audio/mp4;codecs=mp4a.40.2')) mimeType = 'audio/mp4;codecs=mp4a.40.2';
+    else if (MediaRecorder.isTypeSupported('audio/mp4')) mimeType = 'audio/mp4';
+    else mimeType = 'audio/webm';
   } else if (options.format === 'ogg') {
-    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-      mimeType = 'audio/ogg;codecs=opus';
-    } else {
-      mimeType = 'audio/webm';
-    }
+    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) mimeType = 'audio/ogg;codecs=opus';
+    else mimeType = 'audio/webm';
   }
 
   const recorderOptions: MediaRecorderOptions = {
@@ -666,18 +629,13 @@ async function encodeCompressedAudio(
   };
 
   const outputMime =
-    options.format === 'mp3'
-      ? 'audio/mpeg'
-      : options.format === 'm4a'
-      ? 'audio/mp4'
-      : options.format === 'ogg'
-      ? 'audio/ogg'
+    options.format === 'mp3' ? 'audio/mpeg'
+      : options.format === 'm4a' ? 'audio/mp4'
+      : options.format === 'ogg' ? 'audio/ogg'
       : 'audio/wav';
 
   const recordPromise = new Promise<Blob>((resolve) => {
-    recorder.onstop = () => {
-      resolve(new Blob(chunks, { type: outputMime }));
-    };
+    recorder.onstop = () => resolve(new Blob(chunks, { type: outputMime }));
   });
 
   recorder.start();
