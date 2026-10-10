@@ -25,9 +25,6 @@ export function formatDurationHuman(seconds: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-/**
- * Resolves resolution dimensions based on preset
- */
 export function resolveResolutionDimensions(
   preset: VideoResolutionPreset,
   sourceWidth: number = 1920,
@@ -79,14 +76,14 @@ function getFcpTimebase(fps: number) {
  */
 export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
+  const isVideo = file.mediaType === 'video';
   
   const tb = getFcpTimebase(fps);
   const exactFps = tb.den / tb.num;
   
-  // SAFEGUARD CLAMP: Browsers measure audio track duration, which is often 1-2 frames 
-  // longer than the physical video track. We subtract 1 frame from the total safe bounds 
-  // to ensure FCP never requests an out-of-bounds frame ("no shared media range").
-  const safeTotalFrames = Math.max(1, Math.floor(file.originalDuration * exactFps) - 1);
+  // SAFEGUARD CLAMP: Trim 2 frames off the total duration to avoid the "no shared media range" 
+  // out-of-bounds error on DJI files when they are successfully relinked.
+  const safeTotalFrames = Math.max(1, Math.floor(file.originalDuration * exactFps) - 2);
   
   let spineClips = '';
   let timelineOffsetFrames = 0;
@@ -116,15 +113,16 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   });
 
   const safeFileName = encodeURI(file.name).replace(/#/g, '%23').replace(/\?/g, '%3F');
+  const hasVideoAttr = isVideo ? 'hasVideo="1"' : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
     <resources>
         <format id="r0" name="FFVideoFormat1080p${tb.fpsName}" frameDuration="${tb.frameDuration}" width="1920" height="1080" />
-        <!-- REMOVED hasVideo/hasAudio/audioChannels constraints. 
-             FCP will now dynamically adapt to whatever track configuration the DJI file has. -->
-        <asset id="r1" name="${escapeXml(file.name)}" duration="${safeTotalFrames * tb.num}/${tb.den}s" format="r0">
+        <!-- RESTORED duration and format attributes so FCP can build the "Offline" clip. 
+             KEPT start="0s" to override DJI timecode. -->
+        <asset id="r1" name="${escapeXml(file.name)}" start="0s" duration="${safeTotalFrames * tb.num}/${tb.den}s" format="r0" ${hasVideoAttr} hasAudio="1">
             <media-rep kind="original-media" src="file:///Users/Shared/${safeFileName}" />
         </asset>
     </resources>
@@ -132,8 +130,7 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
         <event name="AutoEdit Export">
             <project name="${escapeXml(file.name)} (Silence Removed)">
                 <sequence format="r0" duration="${timelineOffsetFrames * tb.num}/${tb.den}s" tcStart="0s" tcFormat="NDF">
-                    <spine>${spineClips}
-                    </spine>
+                    <spine>${spineClips}</spine>
                 </sequence>
             </project>
         </event>
@@ -207,12 +204,10 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                         </rate>
                     </samplecharacteristics>
                 </format>
-                <track>${trackClips}
-                </track>
+                <track>${trackClips}</track>
             </video>
             <audio>
-                <track>${trackClips}
-                </track>
+                <track>${trackClips}</track>
             </audio>
         </media>
     </sequence>
@@ -290,18 +285,12 @@ export function downloadFile(content: string | Blob, filename: string, mimeType:
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/**
- * Progress callback payload
- */
 export interface ExportProgress {
-  percent: number; // 0 to 100
+  percent: number; 
   currentStep: string;
   timeRemainingSec?: number;
 }
 
-/**
- * High-performance Video Rendering & Stitching Engine
- */
 export async function renderAndExportCutVideo(
   file: ProcessedFile,
   options: VideoExportOptions,
@@ -397,10 +386,8 @@ export async function renderAndExportCutVideo(
   const completionPromise = new Promise<Blob>((resolve) => {
     recorder.onstop = () => {
       const outputMime =
-        options.format === 'mp4'
-          ? 'video/mp4'
-          : options.format === 'mov'
-          ? 'video/quicktime'
+        options.format === 'mp4' ? 'video/mp4'
+          : options.format === 'mov' ? 'video/quicktime'
           : 'video/webm';
       resolve(new Blob(recordedChunks, { type: outputMime }));
     };
@@ -469,9 +456,6 @@ export async function renderAndExportCutVideo(
   downloadFile(finalBlob, `${cleanName}_Jumpcut_${options.resolution}_${targetFps}fps.${extension}`, finalBlob.type);
 }
 
-/**
- * High-performance Audio Rendering & Resampling Engine
- */
 export async function renderAndExportCutAudio(
   file: ProcessedFile,
   options: AudioExportOptions,
