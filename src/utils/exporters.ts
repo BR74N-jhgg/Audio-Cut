@@ -62,18 +62,19 @@ export function escapeXml(str: string): string {
 
 /**
  * Helper to convert decimal frame rates (e.g., 29.97, 59.94) into strictly integer FCPXML timebases.
+ * Provides the EXACT format names registered inside Final Cut Pro.
  */
 function getFcpTimebase(fps: number) {
   const roundedFps = Math.round(fps * 1000);
   switch (roundedFps) {
-    case 23976: return { fpsName: "23.98", frameDuration: "1001/24000s", num: 1001, den: 24000 };
-    case 24000: return { fpsName: "24",    frameDuration: "100/2400s",    num: 100, den: 2400 };
-    case 25000: return { fpsName: "25",    frameDuration: "1/25s",        num: 1, den: 25 };
-    case 29970: return { fpsName: "29.97", frameDuration: "1001/30000s",  num: 1001, den: 30000 };
-    case 30000: return { fpsName: "30",    frameDuration: "100/3000s",    num: 100, den: 3000 };
-    case 50000: return { fpsName: "50",    frameDuration: "1/50s",        num: 1, den: 50 };
-    case 59940: return { fpsName: "59.94", frameDuration: "1001/60000s",  num: 1001, den: 60000 };
-    case 60000: return { fpsName: "60",    frameDuration: "100/6000s",    num: 100, den: 6000 };
+    case 23976: return { fpsName: "2398", frameDuration: "1001/24000s", num: 1001, den: 24000 };
+    case 24000: return { fpsName: "24",   frameDuration: "100/2400s",    num: 100, den: 2400 };
+    case 25000: return { fpsName: "25",   frameDuration: "1/25s",        num: 1, den: 25 };
+    case 29970: return { fpsName: "2997", frameDuration: "1001/30000s",  num: 1001, den: 30000 };
+    case 30000: return { fpsName: "30",   frameDuration: "100/3000s",    num: 100, den: 3000 };
+    case 50000: return { fpsName: "50",   frameDuration: "1/50s",        num: 1, den: 50 };
+    case 59940: return { fpsName: "5994", frameDuration: "1001/60000s",  num: 1001, den: 60000 };
+    case 60000: return { fpsName: "60",   frameDuration: "100/6000s",    num: 100, den: 6000 };
     default:
       const intFps = Math.round(fps);
       return { fpsName: String(intFps), frameDuration: `1/${intFps}s`, num: 1, den: intFps };
@@ -88,30 +89,34 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   const isVideo = file.mediaType === 'video';
   
   const tb = getFcpTimebase(fps);
+  const exactFps = tb.den / tb.num; // Precise rational math prevents frame-drift
   
   let spineClips = '';
   let timelineOffsetFrames = 0;
-  const totalOriginalFrames = Math.max(1, Math.floor(file.originalDuration * fps));
+  
+  // Use Math.round with precise rational FPS to perfectly match frame counts
+  const totalOriginalFrames = Math.max(1, Math.round(file.originalDuration * exactFps));
 
   keptSegments.forEach((seg, idx) => {
-    const startFrames = Math.round(seg.start * fps);
-    const durationFrames = Math.max(1, Math.round(seg.duration * fps));
+    const startFrames = Math.round(seg.start * exactFps);
+    const durationFrames = Math.max(1, Math.round(seg.duration * exactFps));
     const clipName = `${escapeXml(file.name)} - Cut ${idx + 1}`;
 
     spineClips += `
-        <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames * tb.num}/${tb.den}s" duration="${durationFrames * tb.num}/${tb.den}s" start="${startFrames * tb.num}/${tb.den}s" format="r0" />`;
+                    <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames * tb.num}/${tb.den}s" duration="${durationFrames * tb.num}/${tb.den}s" start="${startFrames * tb.num}/${tb.den}s" />`;
 
     timelineOffsetFrames += durationFrames;
   });
 
   const safeFileName = encodeURI(file.name).replace(/#/g, '%23').replace(/\?/g, '%3F');
+  const hasVideoAttr = isVideo ? 'hasVideo="1"' : '';
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
     <resources>
         <format id="r0" name="FFVideoFormat1080p${tb.fpsName}" frameDuration="${tb.frameDuration}" width="1920" height="1080" />
-        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames * tb.num}/${tb.den}s" format="r0" hasVideo="${isVideo ? '1' : '0'}" hasAudio="1" audioSources="1" audioChannels="2">
+        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames * tb.num}/${tb.den}s" format="r0" ${hasVideoAttr} hasAudio="1" audioSources="1" audioChannels="2">
             <media-rep kind="original-media" src="file:///Users/Shared/${safeFileName}" />
         </asset>
     </resources>
