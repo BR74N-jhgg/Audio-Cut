@@ -11,6 +11,7 @@ import { ProcessedFile, ProcessingSettings, ThemeMode } from './types';
 import { DEFAULT_SETTINGS } from './utils/presets';
 import { decodeMediaFile, extractWaveformPeaks, detectSilence } from './utils/silenceDetector';
 import { SampleFootageItem } from './utils/sampleFootage';
+import { parseSourceAudioMetadata } from './utils/mediaInfo';
 import { Sliders, Settings, Sun, Moon, RotateCcw, Smartphone, Monitor } from 'lucide-react';
 
 export default function App() {
@@ -78,7 +79,36 @@ export default function App() {
     const sizeMb = (fileObj.size / (1024 * 1024)).toFixed(1);
     const sizeFormatted = `${sizeMb} MB`;
 
-    onStepProgress?.(25, 'Decoding audio stream via native WebAudio DSP...');
+    // Extract video dimensions if video
+    let videoWidth: number | undefined;
+    let videoHeight: number | undefined;
+
+    if (isVideo) {
+      try {
+        const vidElem = document.createElement('video');
+        vidElem.preload = 'metadata';
+        vidElem.src = url;
+        await new Promise<void>((resolve) => {
+          vidElem.onloadedmetadata = () => {
+            if (vidElem.videoWidth && vidElem.videoHeight) {
+              videoWidth = vidElem.videoWidth;
+              videoHeight = vidElem.videoHeight;
+            }
+            resolve();
+          };
+          vidElem.onerror = () => resolve();
+          // Safety timeout
+          setTimeout(() => resolve(), 1500);
+        });
+      } catch (err) {
+        console.warn('Could not read video metadata:', err);
+      }
+    }
+
+    onStepProgress?.(15, 'Inspecting container audio tracks & hardware sample rate...');
+    const sourceMeta = await parseSourceAudioMetadata(fileObj);
+
+    onStepProgress?.(30, 'Decoding audio stream via native WebAudio DSP...');
     await new Promise((r) => setTimeout(r, 60)); // allow UI frame render
     const audioBuffer = existingBuffer || (await decodeMediaFile(fileObj));
 
@@ -92,6 +122,13 @@ export default function App() {
 
     onStepProgress?.(98, 'Finalizing jumpcut sequence...');
     await new Promise((r) => setTimeout(r, 40));
+
+    // Check if webkitRelativePath or path property is present on File
+    const originalFilePath = (fileObj as any).path || (fileObj as any).webkitRelativePath || undefined;
+
+    // Determine definitive audio rate and channels matching the original source media
+    const finalAudioChannels = sourceMeta.audioChannels || (audioBuffer ? audioBuffer.numberOfChannels : 2);
+    const finalAudioRate = sourceMeta.audioSampleRate || (isVideo ? 48000 : (audioBuffer ? audioBuffer.sampleRate : 48000));
 
     return {
       id,
@@ -109,6 +146,11 @@ export default function App() {
       waveformPeaks,
       segments: analysis.segments,
       audioBuffer,
+      videoWidth: videoWidth || (isVideo ? 1920 : undefined),
+      videoHeight: videoHeight || (isVideo ? 1080 : undefined),
+      audioChannels: finalAudioChannels,
+      audioSampleRate: finalAudioRate,
+      originalFilePath,
     };
   };
 

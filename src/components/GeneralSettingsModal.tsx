@@ -115,6 +115,32 @@ export const GeneralSettingsModal: React.FC<GeneralSettingsModalProps> = ({
                   </div>
                 </div>
 
+                {/* Default NLE Timeline Frame Rate */}
+                <div>
+                  <label className={`font-semibold block mb-1 ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                    Default NLE Timeline Frame Rate
+                  </label>
+                  <select
+                    defaultValue="29.97"
+                    className={`w-full border rounded-xl px-3 py-2 outline-none ${
+                      isDark
+                        ? 'bg-[#080d1a] border-[#1e3260] text-white focus:border-cyan-400'
+                        : 'bg-white border-[#ccf4f1] text-slate-800 focus:border-[#0ABAB5]'
+                    }`}
+                  >
+                    <option value="29.97">29.97 FPS (NTSC Standard / YouTube / Broadcast)</option>
+                    <option value="23.976">23.976 FPS (Cinema / Film NTSC)</option>
+                    <option value="24">24 FPS (Cinema True 24p)</option>
+                    <option value="25">25 FPS (PAL / Europe 25p)</option>
+                    <option value="30">30 FPS (Web Standard 30p)</option>
+                    <option value="59.94">59.94 FPS (Broadcast HFR NTSC)</option>
+                    <option value="60">60 FPS (Action / Gaming 60p)</option>
+                  </select>
+                  <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Pre-configures DaVinci Resolve, Final Cut Pro (FCPXML), and Adobe Premiere Pro XML sequence timebase.
+                  </p>
+                </div>
+
                 <div className={`pt-2 border-t space-y-3 ${isDark ? 'border-[#1b2e59]' : 'border-[#ccf4f1]'}`}>
                   <label className="flex items-center gap-3 cursor-pointer">
                     <input

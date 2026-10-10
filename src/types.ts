@@ -44,6 +44,11 @@ export interface ProcessedFile {
   waveformPeaks: number[]; // normalized 0..1
   segments: AudioSegment[];
   audioBuffer?: AudioBuffer;
+  videoWidth?: number;
+  videoHeight?: number;
+  audioChannels?: number;
+  audioSampleRate?: number;
+  originalFilePath?: string;
 }
 
 export type ThemeMode = 'dark' | 'light';
@@ -52,7 +57,7 @@ export type VideoFormat = 'mp4' | 'mov' | 'webm';
 export type AudioFormat = 'wav' | 'mp3' | 'm4a' | 'ogg';
 
 export type VideoResolutionPreset = 'source' | '4k' | '1440p' | '1080p' | '720p' | 'vertical_1080p' | '540p';
-export type VideoFrameRate = 'source' | 60 | 50 | 30 | 25 | 24;
+export type VideoFrameRate = 'source' | 60 | 59.94 | 50 | 30 | 29.97 | 25 | 24 | 23.976;
 
 export interface VideoExportOptions {
   format: VideoFormat;

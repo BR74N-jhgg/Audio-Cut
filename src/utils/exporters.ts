@@ -13,7 +13,8 @@ export function formatTimecode(seconds: number, fps: number = 30): string {
   const h = Math.floor(seconds / 3600);
   const m = Math.floor((seconds % 3600) / 60);
   const s = Math.floor(seconds % 60);
-  const f = Math.floor((seconds % 1) * fps);
+  const effectiveFps = Math.round(fps);
+  const f = Math.floor((seconds % 1) * effectiveFps);
 
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(f).padStart(2, '0')}`;
 }
@@ -60,13 +61,124 @@ export function escapeXml(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
+export interface FcpRateInfo {
+  frameDuration: string;
+  formatName: string;
+  timecodeFormat: 'NDF' | 'DF';
+  formatFrameDurationSeconds: (frames: number) => string;
+}
+
+export function getFcpRateInfo(fps: number, width: number = 1920, height: number = 1080): FcpRateInfo {
+  // Determine standard Apple formatName prefix
+  let resolutionTag = `${width}x${height}`;
+  if (width === 3840 && height === 2160) resolutionTag = '2160p';
+  else if (width === 2560 && height === 1440) resolutionTag = '1440p';
+  else if (width === 1920 && height === 1080) resolutionTag = '1080p';
+  else if (width === 1280 && height === 720) resolutionTag = '720p';
+  else if (width === 1080 && height === 1920) resolutionTag = '1080x1920';
+
+  if (Math.abs(fps - 29.97) < 0.05) {
+    return {
+      frameDuration: '1001/30000s',
+      formatName: `FFVideoFormat${resolutionTag}2997`,
+      timecodeFormat: 'NDF',
+      formatFrameDurationSeconds: (frames: number) => `${frames * 1001}/30000s`,
+    };
+  }
+  if (Math.abs(fps - 23.976) < 0.05) {
+    return {
+      frameDuration: '1001/24000s',
+      formatName: `FFVideoFormat${resolutionTag}2398`,
+      timecodeFormat: 'NDF',
+      formatFrameDurationSeconds: (frames: number) => `${frames * 1001}/24000s`,
+    };
+  }
+  if (Math.abs(fps - 59.94) < 0.05) {
+    return {
+      frameDuration: '1001/60000s',
+      formatName: `FFVideoFormat${resolutionTag}5994`,
+      timecodeFormat: 'NDF',
+      formatFrameDurationSeconds: (frames: number) => `${frames * 1001}/60000s`,
+    };
+  }
+  const intFps = Math.round(fps);
+  return {
+    frameDuration: `1/${intFps}s`,
+    formatName: `FFVideoFormat${resolutionTag}${intFps}`,
+    timecodeFormat: 'NDF',
+    formatFrameDurationSeconds: (frames: number) => `${frames}/${intFps}s`,
+  };
+}
+
+export interface PremiereRateInfo {
+  timebase: number;
+  ntsc: boolean;
+}
+
+export function getPremiereRateInfo(fps: number): PremiereRateInfo {
+  if (Math.abs(fps - 29.97) < 0.05) {
+    return { timebase: 30, ntsc: true };
+  }
+  if (Math.abs(fps - 23.976) < 0.05) {
+    return { timebase: 24, ntsc: true };
+  }
+  if (Math.abs(fps - 59.94) < 0.05) {
+    return { timebase: 60, ntsc: true };
+  }
+  return { timebase: Math.round(fps), ntsc: false };
+}
+
+/**
+ * Builds a properly formatted file:// URI for FCPXML.
+ * FCP strictly expects a valid URI like file:///Volumes/... or file:///Users/...
+ * Or relative file:./filename when placed alongside the media file.
+ */
+export function formatFcpMediaSrc(fileName: string, customPath?: string): string {
+  if (customPath && customPath.trim().length > 0) {
+    let p = customPath.trim();
+    // Normalize Windows backslashes if any
+    p = p.replace(/\\/g, '/');
+    if (p.startsWith('file://')) {
+      return p;
+    }
+    if (p.startsWith('/')) {
+      // Unix/macOS absolute path - requires 3 slashes (file:///Users/...)
+      const encoded = p.split('/').map(seg => encodeURIComponent(seg)).join('/');
+      return `file://${encoded}`;
+    }
+    // Windows drive letter like C:/
+    if (/^[a-zA-Z]:\//.test(p)) {
+      return `file:///${encodeURI(p)}`;
+    }
+  }
+
+  // If no custom directory provided:
+  // Using valid relative URI file:./filename compliant with Apple FCPXML specification
+  const encodedName = encodeURIComponent(fileName);
+  return `file:./${encodedName}`;
+}
+
 /**
  * Generates an FCPXML (Final Cut Pro / DaVinci Resolve XML) compliant with FCPXML 1.9 DTD.
  */
-export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
+export function generateFcpXml(
+  file: ProcessedFile,
+  fps: number = 30,
+  options?: {
+    mediaDirectoryPath?: string;
+    targetWidth?: number;
+    targetHeight?: number;
+    audioRate?: number;
+    audioChannels?: number;
+  }
+): string {
   const keptSegments = file.segments.filter((s) => s.keep);
   const frameRate = fps;
   const isVideo = file.mediaType === 'video';
+
+  const width = options?.targetWidth || file.videoWidth || 1920;
+  const height = options?.targetHeight || file.videoHeight || 1080;
+  const rateInfo = getFcpRateInfo(fps, width, height);
 
   let spineClips = '';
   let timelineOffsetFrames = 0;
@@ -75,29 +187,50 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
   keptSegments.forEach((seg, idx) => {
     const startFrames = Math.round(seg.start * frameRate);
     const durationFrames = Math.max(1, Math.round(seg.duration * frameRate));
-    const clipName = `${escapeXml(file.name)} - Cut ${idx + 1}`;
+    const clipName = `${escapeXml(file.name)} [Cut ${idx + 1}]`;
+
+    const offsetStr = rateInfo.formatFrameDurationSeconds(timelineOffsetFrames);
+    const durationStr = rateInfo.formatFrameDurationSeconds(durationFrames);
+    const startStr = rateInfo.formatFrameDurationSeconds(startFrames);
+
+    const formatId = 'f1';
+    const assetId = 'r1';
 
     spineClips += `
-        <asset-clip name="${clipName}" ref="r1" offset="${timelineOffsetFrames}/${frameRate}s" duration="${durationFrames}/${frameRate}s" start="${startFrames}/${frameRate}s" format="r0" />`;
+        <asset-clip name="${clipName}" ref="${assetId}" offset="${offsetStr}" duration="${durationStr}" start="${startStr}" ${isVideo ? `format="${formatId}"` : ''} audioRole="dialogue" />`;
 
     timelineOffsetFrames += durationFrames;
   });
 
-  const safeFileName = encodeURI(file.name).replace(/#/g, '%23').replace(/\?/g, '%3F');
+  // Calculate audio channels & sample rate strictly matching source
+  const audioChannels = options?.audioChannels || file.audioChannels || (file.audioBuffer ? file.audioBuffer.numberOfChannels : 2);
+  const audioRate = options?.audioRate || file.audioSampleRate || (file.audioBuffer ? file.audioBuffer.sampleRate : (isVideo ? 48000 : 44100));
+
+  // Build media-rep src
+  let fullPath = options?.mediaDirectoryPath ? `${options.mediaDirectoryPath.replace(/\/+$/, '')}/${file.name}` : file.originalFilePath;
+  const mediaSrc = formatFcpMediaSrc(file.name, fullPath);
+
+  const sequenceDurationStr = rateInfo.formatFrameDurationSeconds(timelineOffsetFrames);
+  const assetDurationStr = rateInfo.formatFrameDurationSeconds(totalOriginalFrames);
+
+  const formatId = 'f1';
+  const assetId = 'r1';
+
+  const formatResource = `<format id="${formatId}" name="${rateInfo.formatName}" frameDuration="${rateInfo.frameDuration}" width="${width}" height="${height}" />`;
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE fcpxml>
 <fcpxml version="1.9">
     <resources>
-        <format id="r0" name="FFVideoFormat1080p${frameRate}" frameDuration="1/${frameRate}s" width="1920" height="1080" />
-        <asset id="r1" name="${escapeXml(file.name)}" duration="${totalOriginalFrames}/${frameRate}s" format="r0" hasVideo="${isVideo ? '1' : '0'}" hasAudio="1">
-            <media-rep kind="original-media" src="file://localhost/${safeFileName}" />
+        ${formatResource}
+        <asset id="${assetId}" name="${escapeXml(file.name)}" start="0s" duration="${assetDurationStr}" ${isVideo ? `format="${formatId}"` : ''} hasVideo="${isVideo ? '1' : '0'}" hasAudio="1" audioSources="1" audioChannels="${audioChannels}" audioRate="${audioRate}">
+            <media-rep kind="original-media" src="${mediaSrc}" />
         </asset>
     </resources>
     <library>
         <event name="AutoEdit Export">
-            <project name="${escapeXml(file.name)} (Silence Removed)">
-                <sequence format="r0" duration="${timelineOffsetFrames}/${frameRate}s" tcStart="0s" tcFormat="NDF">
+            <project name="${escapeXml(file.name)} (Silence Removed - ${fps}fps)">
+                <sequence format="${formatId}" duration="${sequenceDurationStr}" tcStart="0s" tcFormat="${rateInfo.timecodeFormat}">
                     <spine>${spineClips}
                     </spine>
                 </sequence>
@@ -113,6 +246,8 @@ export function generateFcpXml(file: ProcessedFile, fps: number = 30): string {
 export function generatePremiereXml(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
   const totalFrames = Math.round(file.newDuration * fps);
+  const rateInfo = getPremiereRateInfo(fps);
+  const ntscStr = rateInfo.ntsc ? 'TRUE' : 'FALSE';
 
   let trackClips = '';
   let currentIn = 0;
@@ -129,8 +264,8 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                 <name>${file.name} [Cut ${idx + 1}]</name>
                 <duration>${Math.round(file.originalDuration * fps)}</duration>
                 <rate>
-                    <timebase>${fps}</timebase>
-                    <ntsc>FALSE</ntsc>
+                    <timebase>${rateInfo.timebase}</timebase>
+                    <ntsc>${ntscStr}</ntsc>
                 </rate>
                 <start>${trackStart}</start>
                 <end>${trackEnd}</end>
@@ -140,7 +275,8 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                     <name>${file.name}</name>
                     <pathurl>${file.name}</pathurl>
                     <rate>
-                        <timebase>${fps}</timebase>
+                        <timebase>${rateInfo.timebase}</timebase>
+                        <ntsc>${ntscStr}</ntsc>
                     </rate>
                     <duration>${Math.round(file.originalDuration * fps)}</duration>
                 </file>
@@ -153,11 +289,11 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
 <!DOCTYPE xmeml>
 <xmeml version="4">
     <sequence id="sequence-1">
-        <name>${file.name} - AutoEdit Jumpcut</name>
+        <name>${file.name} - AutoEdit Jumpcut (${fps}fps)</name>
         <duration>${totalFrames}</duration>
         <rate>
-            <timebase>${fps}</timebase>
-            <ntsc>FALSE</ntsc>
+            <timebase>${rateInfo.timebase}</timebase>
+            <ntsc>${ntscStr}</ntsc>
         </rate>
         <media>
             <video>
@@ -166,7 +302,8 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
                         <width>1920</width>
                         <height>1080</height>
                         <rate>
-                            <timebase>${fps}</timebase>
+                            <timebase>${rateInfo.timebase}</timebase>
+                            <ntsc>${ntscStr}</ntsc>
                         </rate>
                     </samplecharacteristics>
                 </format>
@@ -187,7 +324,8 @@ export function generatePremiereXml(file: ProcessedFile, fps: number = 30): stri
  */
 export function generateEdl(file: ProcessedFile, fps: number = 30): string {
   const keptSegments = file.segments.filter((s) => s.keep);
-  let edlText = `TITLE: ${file.name.replace(/\.[^/.]+$/, '')}_AUTOEDIT\nFCM: NON-DROP FRAME\n\n`;
+  const fcmType = 'NON-DROP FRAME';
+  let edlText = `TITLE: ${file.name.replace(/\.[^/.]+$/, '')}_AUTOEDIT_${fps}FPS\nFCM: ${fcmType}\n\n`;
 
   let recordStart = 0;
 
@@ -311,14 +449,17 @@ export async function renderAndExportCutVideo(
   canvas.height = targetHeight;
   const ctx = canvas.getContext('2d')!;
 
-  // Setup Web Audio graph for video audio track
+  // Setup Web Audio graph for video audio track strictly matching target sample rate
+  const targetSampleRate = options.audioSampleRate || file.audioSampleRate || 48000;
   const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
-    sampleRate: options.audioSampleRate || 48000,
+    sampleRate: targetSampleRate,
   });
 
-  const sourceNode = audioCtx.createMediaElementSource(video);
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume();
+  }
+
   const destNode = audioCtx.createMediaStreamDestination();
-  sourceNode.connect(destNode);
 
   // Combine Canvas video stream + Audio stream
   const canvasStream = canvas.captureStream(targetFps);
@@ -332,6 +473,8 @@ export async function renderAndExportCutVideo(
   if (options.format === 'mp4') {
     if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1.4d401f,mp4a.40.2')) {
       mimeType = 'video/mp4;codecs=avc1.4d401f,mp4a.40.2';
+    } else if (MediaRecorder.isTypeSupported('video/mp4;codecs=avc1,mp4a.40.2')) {
+      mimeType = 'video/mp4;codecs=avc1,mp4a.40.2';
     } else if (MediaRecorder.isTypeSupported('video/mp4')) {
       mimeType = 'video/mp4';
     } else if (MediaRecorder.isTypeSupported('video/webm;codecs=h264,opus')) {
@@ -406,6 +549,19 @@ export async function renderAndExportCutVideo(
       video.addEventListener('seeked', onSeeked);
     });
 
+    // Start audio slice playback synchronously into destination stream
+    let segAudioSource: AudioBufferSourceNode | null = null;
+    if (file.audioBuffer) {
+      try {
+        segAudioSource = audioCtx.createBufferSource();
+        segAudioSource.buffer = file.audioBuffer;
+        segAudioSource.connect(destNode);
+        segAudioSource.start(0, seg.start, seg.duration);
+      } catch (err) {
+        console.warn('Audio segment scheduling warning:', err);
+      }
+    }
+
     // Play segment and draw to canvas
     await new Promise<void>((resolveSegment) => {
       let isSegDone = false;
@@ -420,6 +576,12 @@ export async function renderAndExportCutVideo(
         if (video.currentTime >= seg.end || video.paused || video.ended) {
           isSegDone = true;
           video.pause();
+          if (segAudioSource) {
+            try {
+              segAudioSource.stop();
+              segAudioSource.disconnect();
+            } catch {}
+          }
           resolveSegment();
         } else {
           requestAnimationFrame(checkSegmentProgress);

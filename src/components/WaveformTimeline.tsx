@@ -33,7 +33,8 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
 
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const isPlayingRef = useRef<boolean>(false);
-  const isJumpingRef = useRef<boolean>(false);
+  const isSeekingRef = useRef<boolean>(false);
+  const userRequestedPauseRef = useRef<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [jumpcutMode, setJumpcutMode] = useState<boolean>(true); // default true: skip silences!
   const [zoom, setZoom] = useState<number>(1);
@@ -58,6 +59,14 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
       const t = mediaRef.current.currentTime;
       setCurrentTime(t);
 
+      // If already seeking, wait for the seek to complete before initiating another jump
+      if (isSeekingRef.current || mediaRef.current.seeking) {
+        if (isPlayingRef.current) {
+          animFrame = requestAnimationFrame(checkJumpcut);
+        }
+        return;
+      }
+
       if (isPlayingRef.current && jumpcutMode) {
         // Find segment at current time
         const currentSegIndex = file.segments.findIndex((s) => t >= s.start && t < s.end);
@@ -71,7 +80,7 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
 
             if (nextKept) {
               if (Math.abs(t - nextKept.start) > 0.04) {
-                isJumpingRef.current = true;
+                isSeekingRef.current = true;
                 mediaRef.current.currentTime = nextKept.start;
                 setCurrentTime(nextKept.start);
                 if (mediaRef.current.paused) {
@@ -80,7 +89,8 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
               }
             } else {
               // Reached end of kept content
-              isJumpingRef.current = false;
+              isSeekingRef.current = false;
+              userRequestedPauseRef.current = true;
               mediaRef.current.pause();
               setIsPlaying(false);
               isPlayingRef.current = false;
@@ -108,11 +118,13 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
   const togglePlay = useCallback(() => {
     if (!mediaRef.current) return;
     if (isPlaying) {
-      isJumpingRef.current = false;
+      userRequestedPauseRef.current = true;
+      isSeekingRef.current = false;
       mediaRef.current.pause();
       setIsPlaying(false);
       isPlayingRef.current = false;
     } else {
+      userRequestedPauseRef.current = false;
       const cur = mediaRef.current.currentTime;
       const lastKept = [...file.segments].reverse().find((s) => s.keep);
 
@@ -130,7 +142,7 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
             file.segments.slice(inCutIdx + 1).find((s) => s.keep) ||
             file.segments.find((s) => s.start > cur + 0.02 && s.keep);
           if (nextKept) {
-            isJumpingRef.current = true;
+            isSeekingRef.current = true;
             mediaRef.current.currentTime = nextKept.start;
             setCurrentTime(nextKept.start);
           }
@@ -551,23 +563,37 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
                   className="w-full h-full object-contain"
                   playsInline
                   onEnded={() => {
-                    isJumpingRef.current = false;
+                    userRequestedPauseRef.current = true;
+                    isSeekingRef.current = false;
                     isPlayingRef.current = false;
                     setIsPlaying(false);
                   }}
                   onPlay={() => {
+                    userRequestedPauseRef.current = false;
                     isPlayingRef.current = true;
                     setIsPlaying(true);
                   }}
                   onPause={() => {
-                    if (!isJumpingRef.current) {
+                    // Only pause if this was user-initiated
+                    if (userRequestedPauseRef.current) {
                       isPlayingRef.current = false;
                       setIsPlaying(false);
+                    } else if (isPlayingRef.current && !isSeekingRef.current) {
+                      // Browser paused momentarily for buffer/seek, auto-resume
+                      mediaRef.current?.play().catch(() => {});
                     }
                   }}
+                  onSeeking={() => {
+                    isSeekingRef.current = true;
+                  }}
                   onSeeked={() => {
-                    isJumpingRef.current = false;
-                    if (isPlayingRef.current && mediaRef.current?.paused) {
+                    isSeekingRef.current = false;
+                    if (isPlayingRef.current && mediaRef.current?.paused && !userRequestedPauseRef.current) {
+                      mediaRef.current.play().catch(() => {});
+                    }
+                  }}
+                  onCanPlay={() => {
+                    if (isPlayingRef.current && mediaRef.current?.paused && !userRequestedPauseRef.current) {
                       mediaRef.current.play().catch(() => {});
                     }
                   }}
@@ -582,23 +608,35 @@ export const WaveformTimeline: React.FC<WaveformTimelineProps> = ({
                   ref={mediaRef as any}
                   src={file.url}
                   onEnded={() => {
-                    isJumpingRef.current = false;
+                    userRequestedPauseRef.current = true;
+                    isSeekingRef.current = false;
                     isPlayingRef.current = false;
                     setIsPlaying(false);
                   }}
                   onPlay={() => {
+                    userRequestedPauseRef.current = false;
                     isPlayingRef.current = true;
                     setIsPlaying(true);
                   }}
                   onPause={() => {
-                    if (!isJumpingRef.current) {
+                    if (userRequestedPauseRef.current) {
                       isPlayingRef.current = false;
                       setIsPlaying(false);
+                    } else if (isPlayingRef.current && !isSeekingRef.current) {
+                      mediaRef.current?.play().catch(() => {});
                     }
                   }}
+                  onSeeking={() => {
+                    isSeekingRef.current = true;
+                  }}
                   onSeeked={() => {
-                    isJumpingRef.current = false;
-                    if (isPlayingRef.current && mediaRef.current?.paused) {
+                    isSeekingRef.current = false;
+                    if (isPlayingRef.current && mediaRef.current?.paused && !userRequestedPauseRef.current) {
+                      mediaRef.current.play().catch(() => {});
+                    }
+                  }}
+                  onCanPlay={() => {
+                    if (isPlayingRef.current && mediaRef.current?.paused && !userRequestedPauseRef.current) {
                       mediaRef.current.play().catch(() => {});
                     }
                   }}

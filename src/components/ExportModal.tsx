@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Download,
@@ -7,7 +7,10 @@ import {
   CheckCircle2,
   Layers,
   Clock,
-  Gauge
+  Gauge,
+  Folder,
+  Info,
+  HelpCircle,
 } from 'lucide-react';
 import {
   ProcessedFile,
@@ -46,26 +49,53 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
 
   const isDark = theme === 'dark';
 
+  // Detected native audio sample rate from source media (default 48000 for standard video)
+  const sourceAudioRate = file.audioSampleRate || (file.audioBuffer ? file.audioBuffer.sampleRate : 48000);
+  const sourceAudioChannels = file.audioChannels || (file.audioBuffer ? file.audioBuffer.numberOfChannels : 2);
+
   // Video Settings
   const [videoOptions, setVideoOptions] = useState<VideoExportOptions>({
     format: 'mp4',
     resolution: '1080p',
     frameRate: 30,
     bitrateMbps: 10,
-    audioSampleRate: 48000,
+    audioSampleRate: sourceAudioRate,
     audioBitrateKbps: 256,
   });
 
   // Audio Settings
   const [audioOptions, setAudioOptions] = useState<AudioExportOptions>({
     format: 'wav',
-    sampleRate: 48000,
+    sampleRate: sourceAudioRate,
     bitrateKbps: 256,
     bitDepth: 16,
-    channels: 'stereo',
+    channels: sourceAudioChannels === 1 ? 'mono' : 'stereo',
   });
 
-  const [timelineFps, setTimelineFps] = useState<number>(30);
+  // Auto-sync options if file changes
+  useEffect(() => {
+    if (file) {
+      const detectedRate = file.audioSampleRate || (file.audioBuffer ? file.audioBuffer.sampleRate : 48000);
+      const detectedChannels = file.audioChannels || (file.audioBuffer ? file.audioBuffer.numberOfChannels : 2);
+      setVideoOptions((prev) => ({
+        ...prev,
+        audioSampleRate: detectedRate,
+      }));
+      setAudioOptions((prev) => ({
+        ...prev,
+        sampleRate: detectedRate,
+        channels: detectedChannels === 1 ? 'mono' : 'stereo',
+      }));
+      setFcpAudioRate(detectedRate);
+      setFcpAudioChannels(detectedChannels);
+    }
+  }, [file]);
+
+  const [timelineFps, setTimelineFps] = useState<number>(29.97);
+  const [fcpAudioRate, setFcpAudioRate] = useState<number>(sourceAudioRate);
+  const [fcpAudioChannels, setFcpAudioChannels] = useState<number>(sourceAudioChannels);
+  const [mediaDirectoryPath, setMediaDirectoryPath] = useState<string>('');
+  const [showFcpRelinkGuide, setShowFcpRelinkGuide] = useState<boolean>(false);
   const [isRendering, setIsRendering] = useState<boolean>(false);
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
@@ -117,10 +147,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
   };
 
   const handleExportFcpXml = () => {
-    const xml = generateFcpXml(file, timelineFps);
+    const xml = generateFcpXml(file, timelineFps, {
+      mediaDirectoryPath: mediaDirectoryPath.trim() || undefined,
+      audioRate: fcpAudioRate,
+      audioChannels: fcpAudioChannels,
+    });
     const cleanName = file.name.replace(/\.[^/.]+$/, '');
     downloadFile(xml, `${cleanName}_FCPXML.fcpxml`, 'application/xml');
-    showSuccessNotice('Final Cut Pro XML exported successfully!');
+    showSuccessNotice('Final Cut Pro XML exported successfully with matching audio & media info!');
   };
 
   const handleExportPremiereXml = () => {
@@ -257,12 +291,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                 {file.name}
               </span>
             </div>
-            <div className={`text-[11px] font-mono shrink-0 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Orig: {formatDurationHuman(file.originalDuration)} →{' '}
-              <span className={`font-bold ${isDark ? 'text-cyan-400' : 'text-[#0ABAB5]'}`}>
-                New: {formatDurationHuman(file.newDuration)}
-              </span>{' '}
-              <span className="text-rose-400">(-{file.timeSavedPercentage}%)</span>
+            <div className={`text-[11px] font-mono shrink-0 flex items-center gap-2.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] border ${
+                isDark ? 'bg-[#111f3d] border-[#1e3260] text-cyan-300' : 'bg-[#e6faf8] border-[#b2ebe7] text-[#0d746f]'
+              }`}>
+                Audio: {sourceAudioRate} Hz • {sourceAudioChannels === 1 ? 'Mono' : 'Stereo'}
+              </span>
+              <span>
+                Orig: {formatDurationHuman(file.originalDuration)} →{' '}
+                <span className={`font-bold ${isDark ? 'text-cyan-400' : 'text-[#0ABAB5]'}`}>
+                  New: {formatDurationHuman(file.newDuration)}
+                </span>{' '}
+                <span className="text-rose-400">(-{file.timeSavedPercentage}%)</span>
+              </span>
             </div>
           </div>
 
@@ -410,12 +451,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                             : 'bg-white border-[#ccf4f1] text-slate-800 focus:border-[#0ABAB5]'
                         }`}
                       >
-                        <option value={60}>60 FPS (Ultra Smooth)</option>
+                        <option value={60}>60 FPS (Ultra Smooth 60p)</option>
+                        <option value={59.94}>59.94 FPS (Broadcast HFR NTSC)</option>
                         <option value={50}>50 FPS (PAL Smooth)</option>
-                        <option value={30}>30 FPS (Standard Web & Vlog)</option>
-                        <option value={25}>25 FPS (PAL Standard)</option>
-                        <option value={24}>24 FPS (Cinematic 24p)</option>
-                        <option value="source">Source FPS (Auto)</option>
+                        <option value={30}>30 FPS (Standard Web & Vlog 30p)</option>
+                        <option value={29.97}>29.97 FPS (NTSC Standard / YouTube / Broadcast)</option>
+                        <option value={25}>25 FPS (PAL Standard 25p)</option>
+                        <option value={24}>24 FPS (Cinematic 24p True)</option>
+                        <option value={23.976}>23.976 FPS (Cinema NTSC 23.98p)</option>
+                        <option value="source">Source FPS (Auto Detect)</option>
                       </select>
                     </div>
                   </div>
@@ -465,13 +509,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                     }`}
                   >
                     <div>
-                      <label
-                        className={`text-[10px] uppercase tracking-wider block mb-1 ${
-                          isDark ? 'text-slate-400' : 'text-slate-500'
-                        }`}
-                      >
-                        Audio Track Sample Rate
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label
+                          className={`text-[10px] uppercase tracking-wider block ${
+                            isDark ? 'text-slate-400' : 'text-slate-500'
+                          }`}
+                        >
+                          Audio Track Sample Rate
+                        </label>
+                        <span className={`text-[10px] font-mono ${isDark ? 'text-cyan-400' : 'text-[#0ABAB5]'}`}>
+                          Source: {sourceAudioRate} Hz
+                        </span>
+                      </div>
                       <select
                         value={videoOptions.audioSampleRate}
                         onChange={(e) =>
@@ -486,8 +535,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                             : 'bg-white border-[#ccf4f1] text-slate-800'
                         }`}
                       >
-                        <option value={48000}>48,000 Hz (Video Broadcast Standard)</option>
-                        <option value={44100}>44,100 Hz (Music Standard)</option>
+                        <option value={sourceAudioRate}>
+                          {sourceAudioRate} Hz (Source Match • Recommended)
+                        </option>
+                        {sourceAudioRate !== 48000 && (
+                          <option value={48000}>48,000 Hz (Video Broadcast Standard)</option>
+                        )}
+                        {sourceAudioRate !== 44100 && (
+                          <option value={44100}>44,100 Hz (Music Standard)</option>
+                        )}
+                        {sourceAudioRate !== 96000 && (
+                          <option value={96000}>96,000 Hz (High-Res Master)</option>
+                        )}
                       </select>
                     </div>
 
@@ -572,13 +631,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                   {/* Sample Rate */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label
-                        className={`text-[11px] font-semibold tracking-wider uppercase block mb-1.5 ${
-                          isDark ? 'text-slate-400' : 'text-slate-500'
-                        }`}
-                      >
-                        Sample Rate
-                      </label>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <label
+                          className={`text-[11px] font-semibold tracking-wider uppercase block ${
+                            isDark ? 'text-slate-400' : 'text-slate-500'
+                          }`}
+                        >
+                          Sample Rate
+                        </label>
+                        <span className={`text-[10px] font-mono ${isDark ? 'text-cyan-400' : 'text-[#0ABAB5]'}`}>
+                          Source: {sourceAudioRate} Hz
+                        </span>
+                      </div>
                       <select
                         value={audioOptions.sampleRate}
                         onChange={(e) =>
@@ -590,10 +654,21 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                             : 'bg-white border-[#ccf4f1] text-slate-800 focus:border-[#0ABAB5]'
                         }`}
                       >
-                        <option value={48000}>48,000 Hz (48 kHz - Video & Cinema standard)</option>
-                        <option value={44100}>44,100 Hz (44.1 kHz - CD & Music standard)</option>
-                        <option value={96000}>96,000 Hz (96 kHz - High-Res Audio master)</option>
-                        <option value={32000}>32,000 Hz (32 kHz - Voice notes)</option>
+                        <option value={sourceAudioRate}>
+                          {sourceAudioRate} Hz ({sourceAudioRate / 1000} kHz - Source Match • Recommended)
+                        </option>
+                        {sourceAudioRate !== 48000 && (
+                          <option value={48000}>48,000 Hz (48 kHz - Video & Cinema standard)</option>
+                        )}
+                        {sourceAudioRate !== 44100 && (
+                          <option value={44100}>44,100 Hz (44.1 kHz - CD & Music standard)</option>
+                        )}
+                        {sourceAudioRate !== 96000 && (
+                          <option value={96000}>96,000 Hz (96 kHz - High-Res Audio master)</option>
+                        )}
+                        {sourceAudioRate !== 32000 && (
+                          <option value={32000}>32,000 Hz (32 kHz - Voice notes)</option>
+                        )}
                       </select>
                     </div>
 
@@ -709,6 +784,19 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                 </div>
               )}
 
+              {/* Pro Tip for FCP Users */}
+              <div className={`p-3 rounded-xl border text-[11px] flex items-start gap-2.5 ${
+                isDark ? 'bg-purple-950/20 border-purple-800/40 text-purple-200' : 'bg-purple-50 border-purple-200 text-purple-900'
+              }`}>
+                <Film className="w-4 h-4 shrink-0 text-purple-400 mt-0.5" />
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-xs">Final Cut Pro (FCP) User Tip:</div>
+                  <p className="text-[10px] leading-relaxed opacity-90">
+                    If you want to edit this footage in Final Cut Pro, switch to the <strong>"NLE Timelines (FCPXML)"</strong> tab. FCPXML preserves 100% original camera quality and allows seamless timeline relinking without re-encoding!
+                  </p>
+                </div>
+              </div>
+
               {/* Render & Download Action Button */}
               <div>
                 <button
@@ -758,12 +846,146 @@ export const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, file,
                         : 'bg-white border-[#ccf4f1] text-slate-800'
                     }`}
                   >
-                    <option value={24}>24 FPS (Film)</option>
-                    <option value={25}>25 FPS (PAL)</option>
-                    <option value={30}>30 FPS (Web / NTSC)</option>
-                    <option value={60}>60 FPS (Gaming / Action)</option>
+                    <option value={29.97}>29.97 FPS (NTSC Standard / YouTube / Broadcast)</option>
+                    <option value={23.976}>23.976 FPS (Cinema / Film NTSC)</option>
+                    <option value={24}>24 FPS (Cinema True)</option>
+                    <option value={25}>25 FPS (PAL / Europe)</option>
+                    <option value={30}>30 FPS (Web Standard 30p)</option>
+                    <option value={59.94}>59.94 FPS (Broadcast HFR NTSC)</option>
+                    <option value={60}>60 FPS (Gaming / Action 60p)</option>
                   </select>
                 </div>
+              </div>
+
+              {/* Final Cut Pro Media Linking Options Box */}
+              <div
+                className={`p-3.5 rounded-xl border space-y-2.5 ${
+                  isDark ? 'bg-[#0a1226] border-[#1e3260]' : 'bg-[#f4fcfb] border-[#bceee9]'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Folder className={`w-4 h-4 ${isDark ? 'text-purple-400' : 'text-purple-600'}`} />
+                    <span className={`font-semibold text-xs ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                      FCP Media Relinking & Source Matching
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowFcpRelinkGuide(!showFcpRelinkGuide)}
+                    className={`text-[11px] flex items-center gap-1 cursor-pointer transition-colors ${
+                      isDark ? 'text-cyan-400 hover:text-cyan-300' : 'text-[#0ABAB5] hover:text-[#0d746f]'
+                    }`}
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    <span>{showFcpRelinkGuide ? 'Hide guide' : 'Why "Relink" happens?'}</span>
+                  </button>
+                </div>
+
+                <p className={`text-[11px] leading-relaxed ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  Detected original media dimensions:{' '}
+                  <span className="font-semibold text-purple-400">
+                    {file.videoWidth || 1920}×{file.videoHeight || 1080}
+                  </span>{' '}
+                  • Audio:{' '}
+                  <span className="font-semibold text-purple-400">
+                    {file.audioChannels || 2}ch @ {file.audioSampleRate || 48000}Hz
+                  </span>
+                  . Ensure timeline frame rate matches your camera clip exactly (e.g. 29.97 or 59.94 FPS).
+                </p>
+
+                {/* FCPXML Audio Configuration Matchers */}
+                <div className="grid grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className={`block text-[10px] uppercase font-semibold mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                      FCPXML Audio Rate:
+                    </label>
+                    <select
+                      value={fcpAudioRate}
+                      onChange={(e) => setFcpAudioRate(Number(e.target.value))}
+                      className={`w-full border rounded-lg px-2.5 py-1.5 text-xs ${
+                        isDark ? 'bg-[#080d1a] border-[#1e3260] text-white' : 'bg-white border-[#ccf4f1] text-slate-800'
+                      }`}
+                    >
+                      <option value={sourceAudioRate}>{sourceAudioRate} Hz (Source Match • Recommended)</option>
+                      <option value={48000}>48,000 Hz (Video Broadcast Standard)</option>
+                      <option value={44100}>44,100 Hz (Music Standard)</option>
+                      <option value={96000}>96,000 Hz (High Resolution)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={`block text-[10px] uppercase font-semibold mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                      FCPXML Audio Channels:
+                    </label>
+                    <select
+                      value={fcpAudioChannels}
+                      onChange={(e) => setFcpAudioChannels(Number(e.target.value))}
+                      className={`w-full border rounded-lg px-2.5 py-1.5 text-xs ${
+                        isDark ? 'bg-[#080d1a] border-[#1e3260] text-white' : 'bg-white border-[#ccf4f1] text-slate-800'
+                      }`}
+                    >
+                      <option value={2}>Stereo (2 Channels)</option>
+                      <option value={1}>Mono (1 Channel)</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Optional Absolute Folder Path input */}
+                <div>
+                  <label className={`block text-[11px] font-medium mb-1 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                    Original Media Folder Path on your Mac (Optional, enables 1-click zero-relink import):
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={mediaDirectoryPath}
+                      onChange={(e) => setMediaDirectoryPath(e.target.value)}
+                      placeholder="/Users/yourname/Movies or /Volumes/SD_CARD/DCIM/100MEDIA"
+                      className={`flex-1 px-2.5 py-1.5 rounded-lg border text-xs font-mono transition-colors ${
+                        isDark
+                          ? 'bg-[#080d1a] border-[#1e3260] text-slate-200 placeholder-slate-600 focus:border-cyan-400'
+                          : 'bg-white border-[#ccf4f1] text-slate-800 placeholder-slate-400 focus:border-[#0ABAB5]'
+                      }`}
+                    />
+                  </div>
+                  <span className={`text-[10px] block mt-1 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                    Tip: Right-click your media file in macOS Finder, hold <kbd className="px-1 py-0.5 rounded bg-slate-700 text-slate-200">Option ⌥</kbd>, and choose <strong>"Copy as Pathname"</strong>.
+                  </span>
+                </div>
+
+                {/* Relink Guide Accordion */}
+                {showFcpRelinkGuide && (
+                  <div
+                    className={`mt-2 p-3.5 rounded-xl border text-[11px] space-y-2.5 ${
+                      isDark ? 'bg-[#080d1a]/90 border-[#23386b] text-slate-300' : 'bg-white border-[#ccf4f1] text-slate-700'
+                    }`}
+                  >
+                    <div className="font-semibold text-xs flex items-center gap-1.5 text-amber-400">
+                      <Info className="w-4 h-4 shrink-0" />
+                      Diagnosing "Incompatible media / The original file had audio, but the new file does not"
+                    </div>
+
+                    <div className="space-y-1.5 text-[11px] leading-relaxed text-slate-300">
+                      <p>
+                        <strong className="text-white">Why Final Cut Pro shows this error:</strong> When you open FCP's <em>Relink Files</em> dialog, FCP verifies that the target file matches the original media asset's duration, audio track layout, and sample rate.
+                      </p>
+                      <ul className="list-disc list-inside space-y-1 pl-1 text-slate-300">
+                        <li>
+                          <strong className="text-amber-300">Relinking to a cut video:</strong> If you try to relink your original camera clip to a rendered cut/pruned video file, FCP will <strong>always reject it</strong> because the cut file has a shorter duration and modified audio! In FCP, <em>Relink Files</em> is only for reconnecting the original uncut footage.
+                        </li>
+                        <li>
+                          <strong className="text-amber-300">Correct Workflow with FCPXML:</strong> Import the <code>.fcpxml</code> into Final Cut Pro (<code>File &gt; Import &gt; XML</code>). Final Cut Pro will open a new project that non-destructively arranges your original high-quality footage on the timeline with all silence cuts in place.
+                        </li>
+                        <li>
+                          <strong className="text-amber-300">If FCP prompts to Relink on XML import:</strong> Click <em>Locate All...</em> and select your <strong>original camera video file ({file.name})</strong>, NEVER a rendered cut file.
+                        </li>
+                        <li>
+                          <strong className="text-amber-300">Audio Sample Rate Match:</strong> Ensure the FCPXML audio rate matches your source file (typically <strong>48,000 Hz</strong> for camera video).
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* DaVinci Resolve */}

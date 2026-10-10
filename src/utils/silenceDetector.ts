@@ -2,12 +2,13 @@ import { ProcessingSettings, AudioSegment } from '../types';
 
 /**
  * Decodes an audio/video File or Blob into an AudioBuffer using the browser's Web Audio API.
+ * Uses native sampleRate without forcing 44100 Hz so the true source audio rate is preserved.
  */
 export async function decodeMediaFile(file: File | Blob): Promise<AudioBuffer> {
   const arrayBuffer = await file.arrayBuffer();
-  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({
-    sampleRate: 44100,
-  });
+  // Do NOT constrain sampleRate so the browser initializes AudioContext
+  // at the system/hardware native sample rate (e.g. 48000 Hz for video or 44100 Hz for CD)
+  const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
 
   try {
     const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
